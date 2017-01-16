@@ -95,11 +95,15 @@
     <None Include="project.json" />
   </ItemGroup>
   <ItemGroup>
+    <SDKReference Include="SQLite.UWP.2015, Version=3.16.2">
+      <Name>SQLite for Universal Windows Platform</Name>
+    </SDKReference>
     <SDKReference Include="WindowsIoT, Version=10.0.10586.0">
       <Name>Windows IoT Extension SDK</Name>
     </SDKReference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="SensorReading.cs" />
     <Compile Include="SHT15.cs" />
     <Compile Include="StartupTask.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

@@ -13,6 +13,10 @@ using Blinky;
 using Windows.Devices.I2c;
 using Windows.Foundation.Diagnostics;
 using Windows.Devices.Enumeration;
+using SQLite.Net;
+using System.IO;
+using SQLite.Net.Platform.WinRT;
+using Windows.Storage;
 
 namespace BlinkyHeadlessCS
 {
@@ -59,17 +63,37 @@ namespace BlinkyHeadlessCS
         private uint MS = 0;
         private static double CurrentLux = 0;
 
+        private string path;
+        private SQLiteConnection conn;
+
         //LoggingChannel lc = new LoggingChannel("my provider", null, new Guid("4bd2826e-54a1-4ba9-bf63-92b73ea1ac4a"));
         //lc.LogMessage("I made a message!");
-        
+
 
         public void Run(IBackgroundTaskInstance taskInstance)
         {
             deferral = taskInstance.GetDeferral();
+            InitDatabase();
             InitGPIO();
-            timer = ThreadPoolTimer.CreatePeriodicTimer(Timer_Tick, TimeSpan.FromMilliseconds(1000));
-            
+            timer = ThreadPoolTimer.CreatePeriodicTimer(Timer_Tick, TimeSpan.FromSeconds(5));
         }
+
+        private void InitDatabase()
+        {
+            path = Path.Combine(ApplicationData.Current.LocalFolder.Path, "db.sqlite");
+
+            conn = new SQLiteConnection(new SQLitePlatformWinRT(), path);
+
+            //conn.CreateTable<SensorReading>();
+
+            //var query = conn.Table<SensorReading>();
+
+            //foreach (SensorReading reading in query)
+            //{
+            //    Debug.WriteLine("Id " + reading.Id);
+            //}
+        }
+
         private void InitGPIO()
         {
             InitializeSwitchesAndFans();
@@ -145,6 +169,21 @@ namespace BlinkyHeadlessCS
             CheckTimeForSwitches();
             GetTempHumSensorReadings();
             GetLuminosityReadings();
+
+            InsertValuesIntoDB();
+        }
+
+        private void InsertValuesIntoDB()
+        {
+            SensorReading reading = new SensorReading();
+            reading.TemperatureF = TemperatureF;
+            reading.Humidity = Humidity;
+            reading.Lux = CurrentLux;
+            reading.FoggerOn = FoggerFan_Value == GpioPinValue.High;
+            reading.BoilerOn = Boiler_Value == GpioPinValue.High;
+
+            var success = conn.Insert(reading);
+            Debug.WriteLine("Successful db write: " + success);
         }
 
         private void CheckTimeForSwitches()
