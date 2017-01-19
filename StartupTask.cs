@@ -17,6 +17,9 @@ using SQLite.Net;
 using System.IO;
 using SQLite.Net.Platform.WinRT;
 using Windows.Storage;
+using Newtonsoft.Json;
+using System.Threading.Tasks;
+using System.Threading;
 
 namespace BlinkyHeadlessCS
 {
@@ -25,24 +28,33 @@ namespace BlinkyHeadlessCS
         BackgroundTaskDeferral deferral;
         private GpioPinValue value = GpioPinValue.High;
         private ThreadPoolTimer timer;
+        private Timer _timer;
 
         #region Switches
         // Pins for switches and fan transistors  5+6?
         //{ 5, 9, 11, 22, 10, 17, 27 }; => { 1+2, 3, 4, 5, 6, 7, 8 };
-        private int[] UnusedSwitchPins = { 5, 11, 17, 27 };
-        private GpioPin[] UnusedSwitches = new GpioPin[4];
+        private int[] UnusedSwitchPins = { 5, 27 };
+        private GpioPin[] UnusedSwitches = new GpioPin[2];
 
-        private const int MAIN_LED_PIN = 9;
+        private const int MAIN_LED_PIN = 9; //3
         private GpioPinValue MainLED_Value;
         private GpioPin MainLED;
 
-        private const int FOGGER_PIN = 22;
+        private const int BONSAI_PIN = 11;  //4
+        private GpioPinValue Bonsai_Value;
+        private GpioPin Bonsai;
+
+        private const int FOGGER_PIN = 22;  //5
         private GpioPinValue Fogger_Value;
         private GpioPin Fogger;
 
-        private const int BOILER_PIN = 10;
+        private const int BOILER_PIN = 10;  //6
         private GpioPinValue Boiler_Value;
         private GpioPin Boiler;
+
+        private const int HEAT_LAMP_PIN = 17;  //7
+        private GpioPinValue HeatLamp_Value;
+        private GpioPin HeatLamp;
 
         private const int FOGGER_FAN_PIN = 13;
         private GpioPinValue FoggerFan_Value;
@@ -54,8 +66,11 @@ namespace BlinkyHeadlessCS
         private SHT15 TempHumiditySensor = null;
         private static double TemperatureF = 0.0;
         private static double Humidity = 0.0;
+        private static double _maximumTemperature = 120.0;
+        private static double _minimumTemperature = 40.0;
+        private static double _maximumHumidity = 100.0;
+        private static double _minimumHumidity = 20.0;
 
-        private static int _maximumTemperature = 500;
         private const string I2C_CONTROLLER_NAME = "I2C1";
         private I2cDevice I2CDev;
         private TSL2561 LightSensor;
@@ -63,8 +78,12 @@ namespace BlinkyHeadlessCS
         private uint MS = 0;
         private static double CurrentLux = 0;
 
+        private SensorReading prevReading = null;
         private string path;
         private SQLiteConnection conn;
+        private const string ServiceAddress = "http://orchidariumapi20170118080711.azurewebsites.net/api/";
+        //private const string ServiceAddress = "http://192.168.0.106:50117/api/";
+        private const string DeviceKey = "7f03a2a5-2441-4f7c-91f5-07cf319d323d";
 
         //LoggingChannel lc = new LoggingChannel("my provider", null, new Guid("4bd2826e-54a1-4ba9-bf63-92b73ea1ac4a"));
         //lc.LogMessage("I made a message!");
@@ -73,25 +92,19 @@ namespace BlinkyHeadlessCS
         public void Run(IBackgroundTaskInstance taskInstance)
         {
             deferral = taskInstance.GetDeferral();
-            InitDatabase();
+            GetConnection();
             InitGPIO();
-            timer = ThreadPoolTimer.CreatePeriodicTimer(Timer_Tick, TimeSpan.FromSeconds(5));
+            timer = ThreadPoolTimer.CreatePeriodicTimer(Timer_Tick, TimeSpan.FromSeconds(10));
+            //_timer = new Timer(Timer_Tick, null, 0, 5 * 60 * 1000);
         }
 
-        private void InitDatabase()
+        private void GetConnection()
         {
             path = Path.Combine(ApplicationData.Current.LocalFolder.Path, "db.sqlite");
 
             conn = new SQLiteConnection(new SQLitePlatformWinRT(), path);
 
-            //conn.CreateTable<SensorReading>();
-
-            //var query = conn.Table<SensorReading>();
-
-            //foreach (SensorReading reading in query)
-            //{
-            //    Debug.WriteLine("Id " + reading.Id);
-            //}
+            conn.CreateTable<SensorReading>();
         }
 
         private void InitGPIO()
@@ -110,13 +123,17 @@ namespace BlinkyHeadlessCS
                 return;
             }
             MainLED = controller.OpenPin(MAIN_LED_PIN);
+            Bonsai = controller.OpenPin(BONSAI_PIN);
             Fogger = controller.OpenPin(FOGGER_PIN);
             Boiler = controller.OpenPin(BOILER_PIN);
+            HeatLamp = controller.OpenPin(HEAT_LAMP_PIN);
             FoggerFan = controller.OpenPin(FOGGER_FAN_PIN);
             CheckTimeForSwitches();
             MainLED.SetDriveMode(GpioPinDriveMode.Output);
+            Bonsai.SetDriveMode(GpioPinDriveMode.Output);
             Fogger.SetDriveMode(GpioPinDriveMode.Output);
             Boiler.SetDriveMode(GpioPinDriveMode.Output);
+            HeatLamp.SetDriveMode(GpioPinDriveMode.Output);
             FoggerFan.SetDriveMode(GpioPinDriveMode.Output);
 
             for (int i = 0; i < UnusedSwitchPins.Length; i++)
@@ -161,7 +178,7 @@ namespace BlinkyHeadlessCS
             //Debug.WriteLine("TSL2561 ID: " + LightSensor.GetId());
         }
 
-        private void Timer_Tick(ThreadPoolTimer timer)
+        private async void Timer_Tick(ThreadPoolTimer timer)
         {
             //value = (value == GpioPinValue.High) ? GpioPinValue.Low : GpioPinValue.High;
             //Debug.WriteLine("Value is " + value + "at time " + timer.Period);
@@ -169,19 +186,84 @@ namespace BlinkyHeadlessCS
             CheckTimeForSwitches();
             GetTempHumSensorReadings();
             GetLuminosityReadings();
-
-            InsertValuesIntoDB();
+            Debug.WriteLine("Temp: " + TemperatureF);
+            SensorReading curReading = FillInReading();
+            if (ValidReading(curReading) && (prevReading == null || !AreSameReadings(curReading)))
+            {
+                Debug.WriteLine("Inserting into db");
+                InsertValuesIntoDB(curReading);
+                await SaveToCloud(curReading);
+                prevReading = curReading;
+            }
         }
 
-        private void InsertValuesIntoDB()
+        private bool ValidReading(SensorReading curReading)
+        {
+            bool valid = true;
+            if (curReading.TemperatureF > _maximumTemperature || curReading.TemperatureF < _minimumTemperature)
+                valid = false;
+            if (curReading.Humidity > _maximumHumidity || curReading.Humidity < _minimumHumidity)
+                valid = false;
+
+            return valid;
+        }
+
+        private async Task SaveToCloud(SensorReading curReading)
+        {
+            using (var client = new HttpClient())
+            {
+                curReading.Id = 0;
+                var url = ServiceAddress + "sensorreading";
+                var body = JsonConvert.SerializeObject(curReading);
+                //_logger.Info("Web reporting client: " + body);
+                Debug.WriteLine("Web reporting client: " + body);
+                var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+                var response = await client.PostAsync(url, content);
+                body = "";
+
+                if (response.Content != null)
+                {
+                    body = await response.Content.ReadAsStringAsync();
+                }
+
+                Debug.WriteLine("Web reporting client: " + response.StatusCode + " " + body);
+            }
+        }
+
+        private bool AreSameReadings(SensorReading curReading)
+        {
+            return curReading.BoilerOn == prevReading.BoilerOn &&
+                curReading.FoggerOn == prevReading.FoggerOn &&
+                curReading.BonsaiOn == prevReading.BonsaiOn &&
+                SimilarNumbers(curReading.TemperatureF, prevReading.TemperatureF) &&
+                SimilarNumbers(curReading.Humidity, prevReading.Humidity) &&
+                SimilarNumbers(curReading.Lux, prevReading.Lux);
+        }
+
+        private bool SimilarNumbers(double one, double two)
+        {
+            double diff = Math.Abs(one - two);
+            return diff < 2;
+        }
+
+        private SensorReading FillInReading()
         {
             SensorReading reading = new SensorReading();
             reading.TemperatureF = TemperatureF;
             reading.Humidity = Humidity;
             reading.Lux = CurrentLux;
+            reading.SoilMoisture = 0;
             reading.FoggerOn = FoggerFan_Value == GpioPinValue.High;
             reading.BoilerOn = Boiler_Value == GpioPinValue.High;
+            reading.BonsaiOn = Bonsai_Value == GpioPinValue.High;
+            reading.DateAdded = DateTime.Now;
 
+            return reading;
+        }
+
+        private void InsertValuesIntoDB(SensorReading reading)
+        {
             var success = conn.Insert(reading);
             Debug.WriteLine("Successful db write: " + success);
         }
@@ -191,16 +273,22 @@ namespace BlinkyHeadlessCS
             MainLED_Value = IsDayTime() ? GpioPinValue.High : GpioPinValue.Low;
             MainLED.Write(MainLED_Value);
 
+            Bonsai_Value = IsBonsaiWateringTime() ? GpioPinValue.High : GpioPinValue.Low;
+            Bonsai.Write(Bonsai_Value);
+
             Fogger_Value = IsFirstFiveMinutes() ? GpioPinValue.High : GpioPinValue.Low;
             Fogger.Write(Fogger_Value);
 
             Boiler_Value = IsFirstTenMinutes() ? GpioPinValue.High : GpioPinValue.Low;
             Boiler.Write(Boiler_Value);
 
+            HeatLamp_Value = MainLED_Value;
+            HeatLamp.Write(HeatLamp_Value);
+
             FoggerFan_Value = Fogger_Value;
             FoggerFan.Write(FoggerFan_Value);
 
-            Debug.WriteLine($"Main led is {MainLED_Value}, Fogger is {Fogger_Value}, Boiler is {Boiler_Value}");
+            Debug.WriteLine($"Main led is {MainLED_Value}, Fogger is {Fogger_Value}, Boiler is {Boiler_Value}, Bonsai is {Bonsai_Value}");
         }
 
         private void GetLuminosityReadings()
@@ -232,6 +320,16 @@ namespace BlinkyHeadlessCS
 
 
 
+        private bool IsBonsaiWateringTime()
+        {
+            int year = DateTime.Now.Year;
+            int month = DateTime.Now.Month;
+            int day = DateTime.Now.Day - (DateTime.Now.DayOfWeek - DayOfWeek.Wednesday);
+
+            DateTime low = new DateTime(year, month, day, 8, 0, 0, 0);
+            DateTime high = new DateTime(year, month, day, 8, 1, 0, 0);
+            return low.CompareTo(DateTime.Now) >= 0 && high.CompareTo(DateTime.Now) <= 0;
+        }
 
         private bool IsFirstTenMinutes()
         {
@@ -247,5 +345,9 @@ namespace BlinkyHeadlessCS
         {
             return DateTime.Now.Hour > 8 && DateTime.Now.Hour < 20;
         }
+
+        /*
+         * Server=tcp:orchidarium.database.windows.net,1433;Initial Catalog=Orchidarium;Persist Security Info=False;User ID=jdahirkanehl;Password=inl@NDj0b;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;
+         */
     }
 }

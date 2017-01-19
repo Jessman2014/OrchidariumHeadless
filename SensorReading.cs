@@ -14,7 +14,10 @@ namespace BlinkyHeadlessCS
         public double TemperatureF { get; set; }
         public double Humidity { get; set; }
         public double Lux { get; set; }
+        public double SoilMoisture { get; set; }
         public bool FoggerOn { get; set; }
         public bool BoilerOn { get; set; }
+        public bool BonsaiOn { get; set; }
+        public DateTime DateAdded { get; set; }
     }
 }
