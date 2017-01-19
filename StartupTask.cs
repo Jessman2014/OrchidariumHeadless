@@ -346,8 +346,5 @@ namespace BlinkyHeadlessCS
             return DateTime.Now.Hour > 8 && DateTime.Now.Hour < 20;
         }
 
-        /*
-         * Server=tcp:orchidarium.database.windows.net,1433;Initial Catalog=Orchidarium;Persist Security Info=False;User ID=jdahirkanehl;Password=inl@NDj0b;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;
-         */
     }
 }
